@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: proxy.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: proxy.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>"use strict";
+/**
+ * Ici nous avont tout les packages dont nous besoins.
+ */
+const https = require("https");
+const http = require("http");
+const url = require("url");
+const net = require("net");
+const forge = require("node-forge");
+const pki = forge.pki;
+const fs = require("fs");
+const path = require("path");
+const mkdirp = require("mkdirp");
+const tls = require("tls");
+const axios = require("axios");
+const { Certificate } = require("crypto");
+const { Socket } = require("dgram");
+
+//On creé un server http qui sera l'adresse du proxy
+let httpTunnel = new http.Server();
+// Port du proxy
+let port = 6789;
+
+let content = "";
+let html = "";
+
+//White liste
+let wl = ["www.facebook.com", "www.google.com"];
+//Black list
+let bl = ["www.youtube.com", "www.developer.mozilla.org"];
+
+//On démare le server sur le port 6789
+httpTunnel.listen(port, () => {
+  console.log(
+    `Simple HTTPS Intermediary Agent démarré avec succès, port :${port}`
+  );
+});
+
+//On vois si il y a une erreur lors du démarage du server proxy
+httpTunnel.on("error", (e) => {
+  if (e.code == "EADDRINUSE") {
+    console.error("Échec du démarrage de l’agent intermédiaire HTTP！！");
+    console.error(`port：${port}，Occupé.`);
+  } else {
+    console.error(e);
+  }
+});
+
+//On récupère notre root CA créé dans le chapitre 3
+const caCertPath = path.join(__dirname, "../../rootCA/localIsen.crt");
+const caKeyPath = path.join(__dirname, "../../rootCA/localIsen.key.pem");
+fs.readFileSync(caCertPath);
+fs.readFileSync(caKeyPath);
+const caCertPem = fs.readFileSync(caCertPath);
+const caKeyPem = fs.readFileSync(caKeyPath);
+var caCert = forge.pki.certificateFromPem(caCertPem);
+var caKey = forge.pki.privateKeyFromPem(caKeyPem);
+
+/**
+ * Les demandes pour https sont transmises via http tunnel
+ *
+ * @param {String} req Requette récupéré par le proxy
+ * @param {Socket} cltSocket Socket client relier au server proxy
+ * @param {String} head Head de la page recherché
+ */
+httpTunnel.on("connect", (req, cltSocket, head) => {
+  // On récupère l'url que l'utilisateur a cherché
+  var srvUrl = url.parse(`https://${req.url}`);
+
+  console.log(`CONNECT ${srvUrl.hostname}:${srvUrl.port}`);
+  // Création du server qui va permettre de faire du https
+  createFakeHttpsWebSite(srvUrl.hostname, (port) => {
+    var srvSocket = net.connect(port, "127.0.0.1", () => {
+      cltSocket.write(
+        "HTTP/1.1 200 Connection Established\r\n" +
+          "Proxy-agent: MITM-proxy\r\n" +
+          "\r\n"
+      );
+      srvSocket.write(head);
+      srvSocket.pipe(cltSocket);
+      cltSocket.pipe(srvSocket);
+    });
+
+    srvSocket.on("error", (e) => {
+      console.error(e);
+    });
+  });
+});
+
+/**
+ * Fonction de création du server https pour créer des certificats
+ *
+ * @param {String} domain URL recherché
+ * @param {Function} successFun Fonction qui permet de faire la liaison entre le client et le server du domain
+ */
+function createFakeHttpsWebSite(domain, successFun) {
+  // Création du certificat de l'url que l'utilisateur a cherché
+  createFakeCertificateByDomain(caKey, caCert, domain, true);
+  mkdirp.sync(path.join(__dirname, "../../cert"));
+  // Création du server https
+  var fakeServer = new https.Server({
+    key: fs.readFileSync(path.join(__dirname, `../../cert/${domain}.key`)),
+    cert: fs.readFileSync(path.join(__dirname, `../../cert/${domain}.crt`)),
+    SNICallback: (hostname, done) => {
+      let certObj = createFakeCertificateByDomain(
+        caKey,
+        caCert,
+        hostname,
+        false
+      );
+      done(
+        null,
+        tls.createSecureContext({
+          key: pki.privateKeyToPem(certObj.key),
+          cert: pki.certificateToPem(certObj.cert),
+        })
+      );
+    },
+  });
+
+  // Démarage du server https sur le port 0(localhost)
+  fakeServer.listen(0, () => {
+    var address = fakeServer.address();
+    successFun(address.port);
+  });
+
+  //Quand on reçois une requette on fetch le code
+  fakeServer.on("request", (req, res) => {
+    // Résolution des demandes des clients
+    var urlObject = url.parse(req.url);
+    const url2 = "https://" + domain + urlObject.path;
+    // Fonction qui fetch le code d'une page
+    axios({
+      method: req.method,
+      url: url2,
+    })
+      .then((response) => {
+        html = response.data;
+        content = response.headers["content-type"];
+        res.writeHead(200, { "Content-Type": content });
+        res.write(html);
+        res.end();
+        // Code pour la white list et la black list mais des problèmes sont présent
+        whiteBlackList(response);
+      })
+      .catch(console.error);
+  });
+
+  fakeServer.on("error", (e) => {
+    console.error(e);
+  });
+}
+
+/**
+ * Fonction de création de certificats à la volé
+ *
+ * @param {keyof} caKey Clef de la root CA
+ * @param {Certificate} caCert Certificat de la root CA
+ * @param {String} domain URL recherché
+ * @param {Boolean} test Boolean qui permet de savoir si la fonction doit creer un des fichier pour les certificats ou return les certificats
+ * @returns {object} Return un certificat et une clef
+ */
+function createFakeCertificateByDomain(caKey, caCert, domain, test) {
+  // console.log(test);
+  var keys = pki.rsa.generateKeyPair(2048);
+  var cert = pki.createCertificate();
+  cert.publicKey = keys.publicKey;
+
+  // On ajoute un an à la date de création du certificat
+  cert.serialNumber = new Date().getTime() + "";
+  cert.validity.notBefore = new Date();
+  cert.validity.notBefore.setFullYear(
+    cert.validity.notBefore.getFullYear() - 1
+  );
+  cert.validity.notAfter = new Date();
+  cert.validity.notAfter.setFullYear(cert.validity.notAfter.getFullYear() + 1);
+
+  //Variable qui contient les attributs du certificat
+  var attrs = [
+    {
+      name: "commonName",
+      value: domain,
+    },
+    {
+      name: "countryName",
+      value: "Frrance",
+    },
+    {
+      shortName: "ST",
+      value: "Var",
+    },
+    {
+      name: "localityName",
+      value: "Toulon",
+    },
+    {
+      name: "organizationName",
+      value: "isen",
+    },
+    {
+      shortName: "OU",
+      value: "https://github.com/lerey34/",
+    },
+  ];
+
+  cert.setIssuer(caCert.subject.attributes);
+  cert.setSubject(attrs);
+
+  cert.setExtensions([
+    {
+      name: "basicConstraints",
+      critical: true,
+      cA: false,
+    },
+    {
+      name: "keyUsage",
+      critical: true,
+      digitalSignature: true,
+      contentCommitment: true,
+      keyEncipherment: true,
+      dataEncipherment: true,
+      keyAgreement: true,
+      keyCertSign: true,
+      cRLSign: true,
+      encipherOnly: true,
+      decipherOnly: true,
+    },
+    {
+      name: "subjectKeyIdentifier",
+    },
+    {
+      name: "extKeyUsage",
+      serverAuth: true,
+      clientAuth: true,
+      codeSigning: true,
+      emailProtection: true,
+      timeStamping: true,
+    },
+    {
+      name: "authorityKeyIdentifier",
+    },
+  ]);
+  cert.sign(caKey, forge.md.sha256.create());
+
+  if (test == false) {
+    return {
+      key: keys.privateKey,
+      cert: cert,
+    };
+  } else {
+    var certPem = pki.certificateToPem(cert);
+    var keyPem = pki.privateKeyToPem(keys.privateKey);
+    //  console.log(certPem);
+    //  console.log(keyPem);
+    mkdirp.sync(path.join(__dirname, "../../cert"));
+    fs.writeFileSync(path.join(__dirname, `../../cert/${domain}.crt`), certPem);
+    fs.writeFileSync(path.join(__dirname, `../../cert/${domain}.key`), keyPem);
+  }
+}
+
+/**
+ * Fonction qui permet de voir la white liste et la black liste pour rediriger l'utilisateur
+ *
+ * @param {Response} response C'est la réponse du fetch d'Axios
+ */
+function whiteBlackList(response) {
+  for (let i = 0; i &lt; wl.length; i++) {
+    const element = wl[i];
+    if (element == domain) {
+      html = response.data;
+      content = response.headers["content-type"];
+      res.writeHead(200, { "Content-Type": content });
+      res.write(html);
+      res.end();
+    }
+  }
+  for (let j = 0; j &lt; bl.length; j++) {
+    const element = bl[j];
+    if (element == domain) {
+      html = fs.readFileSync(
+        path.join(__dirname, `../../code/chapter5/error.html`)
+      );
+      content = "text/html;charset=utf-8";
+      res.writeHead(200, { "Content-Type": content });
+      res.write(html);
+      res.end();
+    }
+  }
+}
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Global</h3><ul><li><a href="global.html#createFakeCertificateByDomain">createFakeCertificateByDomain</a></li><li><a href="global.html#createFakeHttpsWebSite">createFakeHttpsWebSite</a></li><li><a href="global.html#https">https</a></li><li><a href="global.html#whiteBlackList">whiteBlackList</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 3.6.10</a> on Fri Apr 15 2022 15:06:45 GMT+0200 (heure d’été d’Europe centrale)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

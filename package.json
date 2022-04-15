@@ -1,0 +1,42 @@
+{
+  "name": "nodejsmitmproxy",
+  "version": "1.0.0",
+  "description": "how to write a mitm proxy base on Node.js",
+  "main": "index.js",
+  "scripts": {
+    "httpProxy": "node code/chapter1/httpProxy.js",
+    "httpMitmProxy": "node code/chapter1/httpMitmProxy.js",
+    "httpTunnelHttps": "node code/chapter2/httpTunnelHttps.js",
+    "createRootCA": "node code/chapter3/createRootCA.js",
+    "installCAForMac": "sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain rootCA/rootCA.crt",
+    "createCertByRootCA": "node code/chapter3/createCertByRootCA.js",
+    "simpleHttpsProxy": "node code/chapter4/simpleHttpsProxy",
+    "startProxy": "node code/chapter5/proxy.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Seynokan/NodejsMITMProxy"
+  },
+  "keywords": [
+    "mtim",
+    "node",
+    "https"
+  ],
+  "author": "Seynokan",
+  "license": "None",
+  "bugs": {
+    "url": "https://github.com/Seynokan/NodejsMITMProxy/issues"
+  },
+  "engines": {
+    "node": ">= 4"
+  },
+  "homepage": "https://github.com/Seynokan/NodejsMITMProxy#readme",
+  "dependencies": {
+    "axios": "^0.26.1",
+    "cheerio": "^1.0.0-rc.10",
+    "mkdirp": "^0.5.1",
+    "node-fetch": "^3.2.3",
+    "node-forge": "^1.3.1",
+    "through2": "^2.0.1"
+  }
+}
